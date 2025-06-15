@@ -160,9 +160,13 @@
 
   "Individual cell within a grid")
 
-;; Clear any previous definition
+;; Clear any previous definitions
 (when (fboundp 'fragment-cell-apply-color)
   (fmakunbound 'fragment-cell-apply-color))
+(when (fboundp 'fragment-cell-markers-changed-p)
+  (fmakunbound 'fragment-cell-markers-changed-p))
+(when (fboundp 'fragment-cell-apply-color-if-moved)
+  (fmakunbound 'fragment-cell-apply-color-if-moved))
 
 (cl-defmethod fragment-cell-apply-color ((cell fragment-cell))
   "Apply colors to this CELL using its markers."
@@ -229,6 +233,47 @@
     (set-marker (fragment-marker-pair-end pair) nil)
     (push (fragment-marker-pair-start pair) fragment--marker-pool)
     (push (fragment-marker-pair-end pair) fragment--marker-pool)))
+
+(defun fragment-pad-string (str width)
+  "Pad STR to specified WIDTH."
+  (let ((len (length str)))
+    (if (>= len width)
+        (substring str 0 width)
+      (concat str (make-string (- width len) ?\s)))))
+
+(defun fragment-wrap-text-to-width (text width)
+  "Wrap TEXT to specified WIDTH, returning wrapped string."
+  (if (<= width 0)
+      text
+    (let ((lines (split-string text "\n"))
+          (wrapped-lines '()))
+      (dolist (line lines)
+        (if (<= (length line) width)
+            (push line wrapped-lines)
+          ;; Split long lines into multiple wrapped lines
+          (let ((remaining line))
+            (while (> (length remaining) width)
+              ;; Try to break at word boundary if possible
+              (let ((break-point (fragment-find-wrap-point remaining width)))
+                (push (substring remaining 0 break-point) wrapped-lines)
+                (setq remaining (substring remaining break-point))))
+            (when (> (length remaining) 0)
+              (push remaining wrapped-lines)))))
+      (mapconcat 'identity (nreverse wrapped-lines) "\n"))))
+
+(defun fragment-find-wrap-point (text width)
+  "Find optimal wrap point in TEXT within WIDTH, preferring word boundaries."
+  (if (<= (length text) width)
+      (length text)
+    ;; Look for space within wrap width, working backwards from width
+    (let ((break-point width))
+      (while (and (> break-point 0)
+                  (not (= (aref text (1- break-point)) ?\s)))
+        (setq break-point (1- break-point)))
+      ;; If no space found, break at width (hard break)
+      (if (= break-point 0)
+          width
+        break-point))))
 
 ;;; Grid Creation and Management
 
@@ -339,7 +384,13 @@
       (fragment-grid-set-all-markers grid))
 
     ;; Apply colors after rendering with proper cell area coverage
-    (fragment-grid-apply-colors grid)))
+    (fragment-grid-apply-colors grid)
+
+    ;; Make grid content read-only
+    (fragment-grid-make-readonly grid)
+
+    ;; Set current grid for editing
+    (setq-local fragment--current-grid grid)))
 
 (defun fragment-grid-build-string (grid)
   "Build the entire GRID as a string with proper layout."
@@ -429,10 +480,10 @@
                                        (setq pos (+ pos (aref col-widths prev-c) gap)))
                                      pos))
                          (cell-start (+ row-start-pos col-start))
-                         (cell-width (oref cell width))
+                         (col-width (aref col-widths c))  ; Use full column width, not just content
                          (cell-height (oref cell height))
-                         ;; For now, simple end calculation - we'll apply colors differently
-                         (cell-end (+ cell-start cell-width)))
+                         ;; Cover the entire cell area including padding
+                         (cell-end (+ cell-start col-width)))
 
                     ;; Create and set markers
                     (unless (oref cell markers)
@@ -503,40 +554,6 @@
           (when (slot-boundp cell 'overlays)
             (oset cell overlays (cons overlay (oref cell overlays)))))))))
 
-(defun fragment-wrap-text-to-width (text width)
-  "Wrap TEXT to specified WIDTH, returning wrapped string."
-  (if (<= width 0)
-      text
-    (let ((lines (split-string text "\n"))
-          (wrapped-lines '()))
-      (dolist (line lines)
-        (if (<= (length line) width)
-            (push line wrapped-lines)
-          ;; Split long lines into multiple wrapped lines
-          (let ((remaining line))
-            (while (> (length remaining) width)
-              ;; Try to break at word boundary if possible
-              (let ((break-point (fragment-find-wrap-point remaining width)))
-                (push (substring remaining 0 break-point) wrapped-lines)
-                (setq remaining (substring remaining break-point))))
-            (when (> (length remaining) 0)
-              (push remaining wrapped-lines)))))
-      (mapconcat 'identity (nreverse wrapped-lines) "\n"))))
-
-(defun fragment-find-wrap-point (text width)
-  "Find optimal wrap point in TEXT within WIDTH, preferring word boundaries."
-  (if (<= (length text) width)
-      (length text)
-    ;; Look for space within wrap width, working backwards from width
-    (let ((break-point width))
-      (while (and (> break-point 0)
-                  (not (= (aref text (1- break-point)) ?\s)))
-        (setq break-point (1- break-point)))
-      ;; If no space found, break at width (hard break)
-      (if (= break-point 0)
-          width
-        break-point))))
-
 (defun fragment-pad-wrapped-content (wrapped-lines width height)
   "Pad WRAPPED-LINES to WIDTH and HEIGHT to match grid layout."
   (let ((padded-lines '()))
@@ -604,15 +621,7 @@
               (setq current-pos (line-end-position))
               (when (< line-idx (1- row-height))
                 (setq current-pos (1+ current-pos)))) ; +1 for newline
-            (setq current-pos (1+ current-pos)))))))) ; +1 for final newline
-
-
-(defun fragment-pad-string (str width)
-  "Pad STR to specified WIDTH."
-  (let ((len (length str)))
-    (if (>= len width)
-        (substring str 0 width)
-      (concat str (make-string (- width len) ?\s)))))
+            (setq current-pos (1+ current-pos))))))) ; +1 for final newline
 
 (defun fragment-grid-update-markers (grid)
   "Update GRID level markers."
@@ -627,6 +636,47 @@
     (set-marker-insertion-type (oref grid start-marker) t)
     (set-marker (oref grid end-marker) end-pos (current-buffer))
     (set-marker-insertion-type (oref grid end-marker) t)))
+
+(defun fragment-grid-make-readonly (grid)
+  "Make GRID content read-only using text properties."
+  (let ((start-pos (point-min))
+        (end-pos (point-max)))
+    (put-text-property start-pos end-pos 'read-only t)
+    (put-text-property start-pos end-pos 'front-sticky '(read-only))
+    (put-text-property start-pos end-pos 'rear-nonsticky '(read-only))))
+
+;;; Cell Editing Functions
+
+(defun fragment-cell-edit ()
+  "Edit the cell at current point."
+  (interactive)
+  (let ((cell (fragment-cell-at-point)))
+    (if cell
+        (let* ((current-content (oref cell content))
+               (new-content (read-string "Edit cell: " current-content)))
+          (fragment-cell-edit-content cell new-content))
+      (message "No cell found at point"))))
+
+(defun fragment-cell-edit-content (cell new-content)
+  "Update CELL with NEW-CONTENT and re-render grid to preserve layout."
+  (let ((grid (oref cell grid))
+        (inhibit-read-only t))
+    ;; Update cell content
+    (oset cell content new-content)
+    (fragment-cell-fit-content cell)
+
+    ;; Re-render entire grid to maintain layout
+    (fragment-grid-render grid)))
+
+(defvar-local fragment--current-grid nil
+  "Current grid in this buffer.")
+
+(defun fragment-cell-at-point ()
+  "Find the cell at current point position using line/column calculation."
+  (when fragment--current-grid
+    ;; For now, return the cell at (0,0) as a simple fallback
+    ;; TODO: Implement proper position-to-cell mapping
+    (fragment-grid-get fragment--current-grid 0 0))))
 
 (provide 'fragment)
 
