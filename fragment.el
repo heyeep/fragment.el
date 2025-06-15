@@ -302,7 +302,7 @@
     start-pos))
 
 (defun fragment-cell-render (cell)
-  "Render a single CELL.
+  "Render a single CELL."
   (let* ((content (oref cell content))
          (width (oref cell width))
          (height (oref cell height))
