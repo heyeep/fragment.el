@@ -48,8 +48,12 @@ When `fragment-grid-mode` is on:
 
 ### Cell
 - `(fragment-cell-set-content cell text)` - set content
-- `(oset cell min-width 5)` - minimum width
+- `(oset cell min-width 5)` - minimum width (default: 1)
 - `(oset cell max-width 20)` - maximum width
+- `(oset cell min-height 3)` - minimum height (default: 1)
+- `(oset cell max-height 10)` - maximum height
+- `(oset cell width 4)` - set cell width (default: 4)
+- `(oset cell height 4)` - set cell height (default: 4)
 - `(oset cell background-color "#FF0000")` - background color
 - `(oset cell foreground-color "white")` - text color
 

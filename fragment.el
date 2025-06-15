@@ -1,5 +1,7 @@
 ;;; fragment.el --- resizeable grid layout -*- lexical-binding: t; -*-
 
+;; Author: Hiep Nguyen
+
 ;;; Commentary:
 
 ;;; Code:
@@ -16,7 +18,7 @@
 
    (created-at :initform nil
                :documentation "Creation timestamp"))
-  "Base class for all Fragment components")
+  "Base class for all fragment components")
 
 (cl-defmethod initialize-instance :after ((obj fragment-component) &rest _)
   "Initialize component with generated ID and timestamp."
@@ -143,9 +145,50 @@
    ;; Parent reference
    (grid :initarg :grid
          :initform nil
-         :documentation "Parent grid reference"))
+         :documentation "Parent grid reference")
+
+   ;; Marker tracking for smart color updates
+   (last-marker-positions :initform nil
+                         :documentation "Cached marker positions (start . end)"))
 
   "Individual cell within a grid")
+
+;; Clear any previous definition
+(when (fboundp 'fragment-cell-apply-color)
+  (fmakunbound 'fragment-cell-apply-color))
+
+(cl-defmethod fragment-cell-apply-color ((cell fragment-cell))
+  "Apply colors to this CELL using its markers."
+  (when (and (oref cell markers)
+             (or (oref cell background-color) (oref cell foreground-color)))
+    (let ((start-marker (fragment-marker-pair-start (oref cell markers)))
+          (end-marker (fragment-marker-pair-end (oref cell markers))))
+      (let ((start (marker-position start-marker))
+            (end (marker-position end-marker)))
+        (when (and start end (< start end))
+          (fragment-apply-face-to-region cell start end))))))
+
+(cl-defmethod fragment-cell-markers-changed-p ((cell fragment-cell))
+  "Check if this CELL's markers have moved since last check."
+  (when (oref cell markers)
+    (let* ((markers (oref cell markers))
+           (current-start (marker-position (fragment-marker-pair-start markers)))
+           (current-end (marker-position (fragment-marker-pair-end markers)))
+           (last-positions (oref cell last-marker-positions)))
+
+      (if (or (null last-positions)
+              (not (equal (cons current-start current-end) last-positions)))
+          ;; Positions changed - update cache and return t
+          (progn
+            (oset cell last-marker-positions (cons current-start current-end))
+            t)
+        ;; No change
+        nil))))
+
+(cl-defmethod fragment-cell-apply-color-if-moved ((cell fragment-cell))
+  "Apply colors only if CELL markers have changed."
+  (when (fragment-cell-markers-changed-p cell)
+    (fragment-cell-apply-color cell)))
 
 ;;; Marker Management
 
@@ -173,7 +216,7 @@
     (make-fragment-marker-pair :start start :end end)))
 
 (defun fragment-release-marker-pair (pair)
-  "Return PAIR of markers to pool for reuse."
+  "Return markers PAIR to pool for reuse."
   (when pair
     (set-marker (fragment-marker-pair-start pair) nil)
     (set-marker (fragment-marker-pair-end pair) nil)
@@ -183,7 +226,7 @@
 ;;; Grid Creation and Management
 
 (defun fragment-grid-create (rows cols)
-  "Create a new grid with ROWS and COLS dimensions."
+  "Create a new grid with specified ROWS and COLS."
   (let ((grid (fragment-grid :rows rows :columns cols)))
     ;; Initialize cells
     (dotimes (r rows)
@@ -193,7 +236,7 @@
     grid))
 
 (defun fragment-grid-add-cell (grid cell)
-  "Add a CELL to the GRID."
+  "Add a CELL to GRID at its position."
   (let* ((row (oref cell row))
          (col (oref cell col))
          (key (cons row col)))
@@ -205,17 +248,17 @@
     (oset cell grid grid)))
 
 (defun fragment-grid-get (grid row col)
-  "Get cell at (ROW, COL) in GRID."
+  "Get cell at specified ROW and COL in GRID."
   (gethash (cons row col) (oref grid cells)))
 
 (defun fragment-grid-find (grid id)
-  "Find cell by ID in GRID."
+  "Find GRID by ID."
   (gethash id (oref grid cells-by-id)))
 
 ;;; Cell Content Management
 
 (defun fragment-cell-set-content (cell content)
-  "Set CONTENT for CELL and resize it to fit."
+  "Set CELL CONTENT and trigger resize."
   (oset cell content content)
   (fragment-cell-fit-content cell))
 
@@ -250,7 +293,7 @@
       result)))
 
 (defun fragment-grid-cell-resized (grid cell)
-  "Handle CELL resize in GRID."
+  "Handle GRID CELL resize notification."
   (fragment-grid-mark-dirty grid))
 
 (defun fragment-grid-mark-dirty (grid)
@@ -258,138 +301,239 @@
   (oset grid total-width 0)
   (oset grid total-height 0))
 
-;;; minor mode
+;;; Minor Mode Declaration (implementation in separate file)
 
 (declare-function fragment-grid-mode "fragment-mode")
 
-;;; api
+;;; Public API
 
 ;;;###autoload
 (defun fragment-create-grid (rows cols)
-  "Create and display a new GRID with ROWS x COLS dimensions."
+  "Create and display a new grid with ROWS x COLS dimensions."
   (interactive "nNumber of rows: \nnNumber of columns: ")
   (let ((grid (fragment-grid-create rows cols)))
     (fragment-grid-render grid)
     grid))
 
 (defun fragment-grid-render (grid)
-  "Render GRID to current buffer."
+  "Render GRID to current buffer with proper grid layout."
   (let ((inhibit-read-only t)
         (buffer-undo-list t))
     ;; Clear buffer
     (erase-buffer)
 
-    ;; Render each row
-    (dotimes (r (oref grid rows))
-      (fragment-grid-render-row grid r))
+    ;; Build grid as string first, then insert with proper markers
+    (let ((grid-string (fragment-grid-build-string grid)))
+      (insert grid-string)
 
-    ;; Set markers
-    (fragment-grid-update-markers grid)
+      ;; Now set markers for each cell based on their positions in the final string
+      (fragment-grid-set-all-markers grid))
 
-    ;; Apply colors after rendering
-    (fragment-grid-apply-all-colors grid)))
+    ;; Apply colors after rendering with proper cell area coverage
+    (fragment-grid-apply-colors grid)))
 
-(defun fragment-grid-render-row (grid row)
-  "Render a single ROW of the GRID."
-  (let ((start-pos (point)))
-    (dotimes (c (oref grid columns))
-      (let ((cell (fragment-grid-get grid row c)))
-        (when cell
-          (fragment-cell-render cell)
-          (when (< c (1- (oref grid columns)))
-            (insert (make-string (oref grid gap) ?\s))))))
-    (insert "\n")
-    start-pos))
+(defun fragment-grid-build-string (grid)
+  "Build the entire GRID as a string with proper layout."
+  (let* ((rows (oref grid rows))
+         (cols (oref grid columns))
+         (gap (oref grid gap))
+         (result ""))
 
-(defun fragment-cell-render (cell)
-  "Render a single CELL."
-  (let* ((content (oref cell content))
-         (width (oref cell width))
-         (height (oref cell height))
-         (lines (split-string content "\n"))
-         (start-pos (point)))
+    ;; Calculate row heights and column widths
+    (let ((row-heights (make-vector rows 0))
+          (col-widths (make-vector cols 0)))
 
-    ;; Create marker pair if needed
-    (unless (oref cell markers)
-      (oset cell markers (fragment-acquire-marker-pair)))
+      ;; Find max height for each row and max width for each column
+      (dotimes (r rows)
+        (let ((max-height 0))
+          (dotimes (c cols)
+            (let ((cell (fragment-grid-get grid r c)))
+              (when cell
+                (setq max-height (max max-height (oref cell height)))
+                (aset col-widths c (max (aref col-widths c) (oref cell width))))))
+          (aset row-heights r max-height)))
 
-    ;; Set start marker
-    (let ((start-marker (fragment-marker-pair-start (oref cell markers))))
-      (set-marker start-marker start-pos (current-buffer))
-      (set-marker-insertion-type start-marker t))
+      ;; Build each row
+      (dotimes (r rows)
+        (let ((row-height (aref row-heights r)))
+          ;; Build each line of this row
+          (dotimes (line-idx row-height)
+            (let ((line ""))
+              ;; Build each column in this line
+              (dotimes (c cols)
+                (let* ((cell (fragment-grid-get grid r c))
+                       (col-width (aref col-widths c))
+                       (cell-content (if cell
+                                        (let* ((content (oref cell content))
+                                               (lines (split-string content "\n"))
+                                               (cell-line (or (nth line-idx lines) "")))
+                                          (fragment-pad-string cell-line col-width))
+                                      (make-string col-width ?\s))))
+                  (setq line (concat line cell-content))
+                  ;; Add gap except after last column
+                  (when (< c (1- cols))
+                    (setq line (concat line (make-string gap ?\s))))))
+              ;; Add this line to result
+              (setq result (concat result line))
+              ;; Add newline except for last line of last row
+              (when (not (and (= r (1- rows)) (= line-idx (1- row-height))))
+                (setq result (concat result "\n")))))))
 
-    ;; Render content with padding
-    (dotimes (line-idx height)
-      (let ((line (or (nth line-idx lines) "")))
-        (let ((padded-line (fragment-pad-string line width)))
-          (message "Rendering line %d: '%s' (width=%d)" line-idx padded-line width)
-          (insert padded-line))
-        (when (< line-idx (1- height))
-          (insert "\n"))))
+      result)))
 
-    ;; Set end marker with correct insertion type
-    (let ((end-marker (fragment-marker-pair-end (oref cell markers))))
-      (set-marker end-marker (point) (current-buffer))
-      (set-marker-insertion-type end-marker nil)) ; nil means marker stays at content end
+(defun fragment-grid-set-all-markers (grid)
+  "Set markers for all cells within GRID based on their positions in the rendered buffer."
+  (let* ((rows (oref grid rows))
+         (cols (oref grid columns))
+         (gap (oref grid gap)))
 
-    ;; Apply colors immediately during rendering when we have exact positions
-    (when (or (oref cell background-color) (oref cell foreground-color))
-      (let ((bg-color (oref cell background-color))
-            (fg-color (oref cell foreground-color)))
-        (when (< start-pos (point))
-          (let ((face-spec '()))
-            (when bg-color
-              (push :background face-spec)
-              (push bg-color face-spec))
-            (when fg-color
-              (push :foreground face-spec)
-              (push fg-color face-spec))
-            (when face-spec
-              (push :weight face-spec)
-              (push 'bold face-spec)
-              (put-text-property start-pos (point) 'face (nreverse face-spec))
-              (message "Applied colors during render: %d-%d" start-pos (point))))))))
+    ;; Calculate row heights and column widths (same as in build-string)
+    (let ((row-heights (make-vector rows 0))
+          (col-widths (make-vector cols 0)))
 
-(defun fragment-cell-apply-colors (cell)
-  "Apply colors to a CELL based on its background-color and foreground-color properties."
-  (when (and (oref cell markers)
-             (or (oref cell background-color) (oref cell foreground-color)))
-    (let ((bg-color (oref cell background-color))
-          (fg-color (oref cell foreground-color))
-          (start-marker (fragment-marker-pair-start (oref cell markers)))
-          (end-marker (fragment-marker-pair-end (oref cell markers))))
-      (let ((start (marker-position start-marker))
-            (end (marker-position end-marker)))
-        (when (and start end (< start end))
-          (let ((face-spec '()))
-            (when bg-color
-              (push :background face-spec)
-              (push bg-color face-spec))
-            (when fg-color
-              (push :foreground face-spec)
-              (push fg-color face-spec))
-            (when face-spec
-              (push :weight face-spec)
-              (push 'bold face-spec)
-              (put-text-property start end 'face (nreverse face-spec)))))))))
+      ;; Find max height for each row and max width for each column
+      (dotimes (r rows)
+        (let ((max-height 0))
+          (dotimes (c cols)
+            (let ((cell (fragment-grid-get grid r c)))
+              (when cell
+                (setq max-height (max max-height (oref cell height)))
+                (aset col-widths c (max (aref col-widths c) (oref cell width))))))
+          (aset row-heights r max-height)))
 
-(defun fragment-grid-apply-all-colors (grid)
-  "Apply colors to all cells in a GRID."
+      ;; Calculate buffer positions for each cell
+      (let ((current-pos 1)) ; Buffer positions start at 1
+        (dotimes (r rows)
+          (let ((row-height (aref row-heights r))
+                (row-start-pos current-pos))
+            ;; For each cell in this row, calculate its position
+            (dotimes (c cols)
+              (let ((cell (fragment-grid-get grid r c)))
+                (when cell
+                  (let* ((col-start (let ((pos 0))
+                                     (dotimes (prev-c c)
+                                       (setq pos (+ pos (aref col-widths prev-c) gap)))
+                                     pos))
+                         (cell-start (+ row-start-pos col-start))
+                         (cell-width (oref cell width))
+                         (cell-height (oref cell height))
+                         ;; For now, simple end calculation - we'll apply colors differently
+                         (cell-end (+ cell-start cell-width)))
+
+                    ;; Create and set markers
+                    (unless (oref cell markers)
+                      (oset cell markers (fragment-acquire-marker-pair)))
+
+                    (let ((start-marker (fragment-marker-pair-start (oref cell markers)))
+                          (end-marker (fragment-marker-pair-end (oref cell markers))))
+                      (set-marker start-marker cell-start (current-buffer))
+                      (set-marker-insertion-type start-marker t)
+                      (set-marker end-marker cell-end (current-buffer))
+                      (set-marker-insertion-type end-marker nil))))))
+
+            ;; Move to next row
+            (dotimes (line-idx row-height)
+              (goto-char current-pos)
+              (setq current-pos (line-end-position))
+              (when (< line-idx (1- row-height))
+                (setq current-pos (1+ current-pos)))) ; +1 for newline
+            (setq current-pos (1+ current-pos)))))))) ; +1 for final newline
+
+(defun fragment-grid-refresh-moved-colors (grid)
+  "Refresh colors only for cells whose markers have moved in GRID."
   (dotimes (r (oref grid rows))
     (dotimes (c (oref grid columns))
       (let ((cell (fragment-grid-get grid r c)))
         (when cell
-          (fragment-cell-apply-colors cell)))))))
+          (fragment-cell-apply-color-if-moved cell))))))
+
+(defun fragment-apply-face-to-region (cell start end)
+  "Apply face to the region defined by START and END based on CELL properties."
+  (let ((bg-color (oref cell background-color))
+        (fg-color (oref cell foreground-color)))
+    (when (or bg-color fg-color)
+      (let ((face-spec '()))
+        (when bg-color
+          (push :background face-spec)
+          (push bg-color face-spec))
+        (when fg-color
+          (push :foreground face-spec)
+          (push fg-color face-spec))
+        (when face-spec
+          (push :weight face-spec)
+          (push 'bold face-spec)
+          (put-text-property start end 'face (nreverse face-spec)))))))
+
+(defun fragment-grid-apply-colors (grid)
+  "Apply colors to all cells with proper full-cell coverage in a GRID."
+  (let* ((rows (oref grid rows))
+         (cols (oref grid columns))
+         (gap (oref grid gap)))
+
+    ;; Calculate row heights and column widths (same as in build-string)
+    (let ((row-heights (make-vector rows 0))
+          (col-widths (make-vector cols 0)))
+
+      ;; Find max height for each row and max width for each column
+      (dotimes (r rows)
+        (let ((max-height 0))
+          (dotimes (c cols)
+            (let ((cell (fragment-grid-get grid r c)))
+              (when cell
+                (setq max-height (max max-height (oref cell height)))
+                (aset col-widths c (max (aref col-widths c) (oref cell width))))))
+          (aset row-heights r max-height)))
+
+      ;; Apply colors to each cell with full area coverage
+      (let ((current-pos 1)) ; Buffer positions start at 1
+        (dotimes (r rows)
+          (let ((row-height (aref row-heights r))
+                (row-start-pos current-pos))
+
+            ;; For each cell in this row, apply colors to its entire area
+            (dotimes (c cols)
+              (let ((cell (fragment-grid-get grid r c)))
+                (when (and cell
+                          (or (oref cell background-color) (oref cell foreground-color)))
+                  (let* ((col-start (let ((pos 0))
+                                     (dotimes (prev-c c)
+                                       (setq pos (+ pos (aref col-widths prev-c) gap)))
+                                     pos))
+                         (col-width (aref col-widths c))
+                         (cell-height (oref cell height)))
+
+                    ;; Apply color to each line of the cell
+                    (dotimes (line-idx cell-height)
+                      (let* ((line-start (+ row-start-pos
+                                           (* line-idx
+                                              (+ (apply #'+ (append col-widths nil))
+                                                 (* (1- cols) gap) 1)) ; +1 for newline
+                                           col-start))
+                             (line-end (+ line-start col-width)))
+
+                        (when (and (>= line-start 1)
+                                   (<= line-end (point-max))
+                                   (< line-start line-end))
+                          (fragment-apply-face-to-region cell line-start line-end))))))))
+
+            ;; Move to next row
+            (dotimes (line-idx row-height)
+              (goto-char current-pos)
+              (setq current-pos (line-end-position))
+              (when (< line-idx (1- row-height))
+                (setq current-pos (1+ current-pos)))) ; +1 for newline
+            (setq current-pos (1+ current-pos)))))))) ; +1 for final newline
+
 
 (defun fragment-pad-string (str width)
-  "Pad string STR to WIDTH characters."
+  "Pad STR to specified WIDTH."
   (let ((len (length str)))
     (if (>= len width)
         (substring str 0 width)
       (concat str (make-string (- width len) ?\s)))))
 
 (defun fragment-grid-update-markers (grid)
-  "Update GRID start and end markers to cover the entire grid."
+  "Update GRID level markers."
   (let ((start-pos (point-min))
         (end-pos (point-max)))
     (unless (oref grid start-marker)
