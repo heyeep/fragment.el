@@ -142,6 +142,13 @@
                      :type (or null string)
                      :documentation "Foreground color for this cell")
 
+
+   ;; Text wrapping
+   (text-wrap :initarg :text-wrap
+              :initform nil
+              :type boolean
+              :documentation "Whether to wrap text that exceeds cell width")
+
    ;; Parent reference
    (grid :initarg :grid
          :initform nil
@@ -265,25 +272,27 @@
 (defun fragment-cell-fit-content (cell)
   "Resize CELL to fit its content."
   (let* ((content (oref cell content))
+         (text-wrap (oref cell text-wrap))
+         (max-width (oref cell max-width))
          (lines (split-string content "\n"))
          (width (apply #'max (mapcar #'length lines)))
-         (height (length lines))
+         (height (length lines)))
 
-         ;; Apply constraints
-         (final-width (fragment-constrain width
-                                         (oref cell min-width)
-                                         (oref cell max-width)))
-         (final-height (fragment-constrain height
-                                          (oref cell min-height)
-                                          (oref cell max-height))))
+    ;; Apply constraints (no content modification for wrapping)
+    (let ((final-width (fragment-constrain width
+                                          (oref cell min-width)
+                                          (oref cell max-width)))
+          (final-height (fragment-constrain height
+                                           (oref cell min-height)
+                                           (oref cell max-height))))
 
-    ;; Update cell dimensions
-    (oset cell width final-width)
-    (oset cell height final-height)
+      ;; Update cell dimensions
+      (oset cell width final-width)
+      (oset cell height final-height)
 
-    ;; Notify grid of dimension change if attached
-    (when (oref cell grid)
-      (fragment-grid-cell-resized (oref cell grid) cell))))
+      ;; Notify grid of dimension change if attached
+      (when (oref cell grid)
+        (fragment-grid-cell-resized (oref cell grid) cell)))))
 
 (defun fragment-constrain (value min-val max-val)
   "Constrain VALUE between MIN-VAL and MAX-VAL."
@@ -365,7 +374,12 @@
                        (col-width (aref col-widths c))
                        (cell-content (if cell
                                         (let* ((content (oref cell content))
-                                               (lines (split-string content "\n"))
+                                               (text-wrap (oref cell text-wrap))
+                                               ;; Apply wrapping if enabled
+                                               (processed-content (if text-wrap
+                                                                     (fragment-wrap-text-to-width content col-width)
+                                                                   content))
+                                               (lines (split-string processed-content "\n"))
                                                (cell-line (or (nth line-idx lines) "")))
                                           (fragment-pad-string cell-line col-width))
                                       (make-string col-width ?\s))))
@@ -451,6 +465,7 @@
   "Apply face to the region defined by START and END based on CELL properties."
   (let ((bg-color (oref cell background-color))
         (fg-color (oref cell foreground-color)))
+
     (when (or bg-color fg-color)
       (let ((face-spec '()))
         (when bg-color
@@ -463,6 +478,73 @@
           (push :weight face-spec)
           (push 'bold face-spec)
           (put-text-property start end 'face (nreverse face-spec)))))))
+
+(defun fragment-apply-visual-wrapping (cell start end wrap-width)
+  "Apply text wrap in CELL from START to END with WRAP-WIDTH."
+  (when (and wrap-width (> wrap-width 0))
+    ;; Get original content from cell object, not from buffer
+    (let* ((original-content (oref cell content))
+           (cell-height (oref cell height))
+           (wrapped-content (fragment-wrap-text-to-width original-content wrap-width))
+           (wrapped-lines (split-string wrapped-content "\n"))
+           ;; Truncate wrapped content to fit within original cell height
+           (truncated-lines (if (> (length wrapped-lines) cell-height)
+                               (seq-take wrapped-lines cell-height)
+                             wrapped-lines))
+           (padded-wrapped (fragment-pad-wrapped-content truncated-lines wrap-width cell-height)))
+
+      ;; Only apply wrapping overlay if content actually needs wrapping
+      (unless (string= original-content wrapped-content)
+        (let ((overlay (make-overlay start end)))
+          (overlay-put overlay 'display padded-wrapped)
+          (overlay-put overlay 'fragment-wrap t)
+
+          ;; Store overlay in cell for cleanup
+          (when (slot-boundp cell 'overlays)
+            (oset cell overlays (cons overlay (oref cell overlays)))))))))
+
+(defun fragment-wrap-text-to-width (text width)
+  "Wrap TEXT to specified WIDTH, returning wrapped string."
+  (if (<= width 0)
+      text
+    (let ((lines (split-string text "\n"))
+          (wrapped-lines '()))
+      (dolist (line lines)
+        (if (<= (length line) width)
+            (push line wrapped-lines)
+          ;; Split long lines into multiple wrapped lines
+          (let ((remaining line))
+            (while (> (length remaining) width)
+              ;; Try to break at word boundary if possible
+              (let ((break-point (fragment-find-wrap-point remaining width)))
+                (push (substring remaining 0 break-point) wrapped-lines)
+                (setq remaining (substring remaining break-point))))
+            (when (> (length remaining) 0)
+              (push remaining wrapped-lines)))))
+      (mapconcat 'identity (nreverse wrapped-lines) "\n"))))
+
+(defun fragment-find-wrap-point (text width)
+  "Find optimal wrap point in TEXT within WIDTH, preferring word boundaries."
+  (if (<= (length text) width)
+      (length text)
+    ;; Look for space within wrap width, working backwards from width
+    (let ((break-point width))
+      (while (and (> break-point 0)
+                  (not (= (aref text (1- break-point)) ?\s)))
+        (setq break-point (1- break-point)))
+      ;; If no space found, break at width (hard break)
+      (if (= break-point 0)
+          width
+        break-point))))
+
+(defun fragment-pad-wrapped-content (wrapped-lines width height)
+  "Pad WRAPPED-LINES to WIDTH and HEIGHT to match grid layout."
+  (let ((padded-lines '()))
+    ;; Pad each wrapped line to the full width
+    (dotimes (i height)
+      (let ((line (or (nth i wrapped-lines) "")))
+        (push (fragment-pad-string line width) padded-lines)))
+    (mapconcat 'identity (nreverse padded-lines) "\n")))
 
 (defun fragment-grid-apply-colors (grid)
   "Apply colors to all cells with proper full-cell coverage in a GRID."

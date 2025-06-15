@@ -47,22 +47,22 @@
 ;;; Grid Registration and Unregistration
 
 (defun fragment-register-grid (grid)
-  "Register a grid in the current buffer"
+  "Register a GRID in the current buffer."
   (unless (memq grid fragment--grids-in-buffer)
     (push grid fragment--grids-in-buffer)))
 
 (defun fragment-unregister-grid (grid)
-  "Unregister a grid from the current buffer"
+  "Unregister a GRID from the current buffer."
   (setq fragment--grids-in-buffer
         (delq grid fragment--grids-in-buffer)))
 
 (defun fragment-get-grids-in-buffer ()
-  "Get all grids in the current buffer"
+  "Get all grids in the current buffer."
   fragment--grids-in-buffer)
 
 ;;; Real-time resize detection
 (defun fragment-realtime-resize-check (&optional window)
-  "Check for real-time buffer/window size changes and resize grids"
+  "Check for real-time buffer/WINDOW size change and resize grids."
   (when fragment-grid-mode
     (let* ((win (or window (selected-window)))
            (new-size (cons (window-body-width win) (window-body-height win))))
@@ -73,7 +73,7 @@
 ;;; Window Resize Handling
 
 (defun fragment-window-resize-handler (&optional frame)
-  "Handle window size changes with debouncing"
+  "Handle window size change with debouncing in FRAME."
   (when fragment-auto-resize
     ;; Cancel existing timer
     (when fragment--resize-timer
@@ -88,7 +88,7 @@
            frame))))
 
 (defun fragment-process-resize-event (&optional frame)
-  "Process the actual resize event"
+  "Process the actual resize event in FRAME."
   (setq fragment--resize-timer nil)
 
   (dolist (window (window-list frame))
@@ -97,13 +97,13 @@
         (fragment-resize-grids-in-buffer)))))
 
 (defun fragment-resize-grids-in-buffer ()
-  "Resize all grids in the current buffer"
+  "Resize all grids in the current buffer."
   (dolist (grid fragment--grids-in-buffer)
     (when (buffer-live-p (oref grid buffer))
       (fragment-grid-handle-window-resize grid))))
 
 (defun fragment-window-config-change-handler ()
-  "Handle window configuration changes"
+  "Handle window configuration change."
   (when fragment-auto-resize
     (let ((new-config (current-window-configuration)))
       (unless (equal new-config fragment--last-window-config)
@@ -113,7 +113,7 @@
 ;;; Grid Resize Logic
 
 (defun fragment-grid-handle-window-resize (grid)
-  "Main resize handler for a specific grid"
+  "Main resize handler for a specific GRID."
   (when (and (oref grid buffer)
              (buffer-live-p (oref grid buffer)))
     (with-current-buffer (oref grid buffer)
@@ -138,7 +138,7 @@
         (fragment-grid-apply-dimensions grid column-widths row-heights)))))
 
 (defun fragment-calculate-column-widths (grid available-width)
-  "Calculate width for each column based on available space."
+  "Calculate AVAILABLE-WIDTH for each column based on available space for GRID."
   (let* ((columns (oref grid columns))
          (min-width 1) ; Minimum column width
          (base-width (max min-width (/ available-width columns)))
@@ -154,7 +154,7 @@
     widths))
 
 (defun fragment-calculate-row-heights (grid available-height)
-  "Calculate height for each row based on available space."
+  "Calculate AVAILABLE-HEIGHT for each row based on available space for GRID."
   (let* ((rows (oref grid rows))
          (min-height 1) ; Minimum row height
          (base-height (max min-height (/ available-height rows)))
@@ -170,7 +170,7 @@
     heights))
 
 (defun fragment-grid-apply-dimensions (grid column-widths row-heights)
-  "Apply new column widths and row heights to grid."
+  "Apply new COLUMN-WIDTHS and ROW-HEIGHTS to GRID."
   (oset grid column-widths column-widths)
   (oset grid row-heights row-heights)
 
@@ -307,7 +307,7 @@
 
 ;;;###autoload
 (defun fragment-grid-info ()
-  "Show information about the grid at point"
+  "Show information about the grid at point."
   (interactive)
   (let ((grid (fragment-grid-at-point)))
     (if grid
@@ -346,7 +346,7 @@
 ;;; Enhanced Grid Creation for Mode
 
 (defun fragment-create-grid-in-mode (rows cols)
-  "Create a grid and register it with the current buffer."
+  "Create a grid with ROWS and COLS in Fragment Grid mode."
   (let ((grid (fragment-grid-create rows cols)))
     (oset grid buffer (current-buffer))
     (fragment-register-grid grid)
