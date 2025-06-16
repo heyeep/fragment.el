@@ -203,52 +203,54 @@
       (message "No cell found at click position"))))
 
 (defun fragment-demo-cell-at-point (grid)
-  "Find which cell the cursor is in for demo purposes."
-  (let* ((current-line (1- (line-number-at-pos))) ; 0-based line number
-         (current-col (current-column))            ; 0-based column number
-         (rows (oref grid rows))
-         (cols (oref grid columns))
-         (gap (oref grid gap)))
+  "Find which cell the cursor is in using hybrid marker + geometry approach."
+  (let ((current-pos (point))
+        (found-cell nil)
+        (rows (oref grid rows))
+        (cols (oref grid columns)))
 
-    ;; Calculate cell dimensions based on actual grid layout
-    (let ((row-heights (make-vector rows 0))
-          (col-widths (make-vector cols 0)))
+    ;; HYBRID APPROACH: Use markers to define buffer positions, geometry to find multi-line cell areas
+    (dotimes (r rows)
+      (dotimes (c cols)
+        (let ((cell (fragment-grid-get grid r c)))
+          (when (and cell (oref cell markers) (not found-cell))
+            (let* ((start-marker (fragment-marker-pair-start (oref cell markers)))
+                   (end-marker (fragment-marker-pair-end (oref cell markers))))
 
-      ;; Find max height for each row and max width for each column
-      (dotimes (r rows)
-        (let ((max-height 0))
-          (dotimes (c cols)
-            (let ((cell (fragment-grid-get grid r c)))
-              (when cell
-                (setq max-height (max max-height (oref cell height)))
-                (aset col-widths c (max (aref col-widths c) (oref cell width))))))
-          (aset row-heights r max-height)))
+              (when (and start-marker end-marker)
+                (let* (;; Get marker positions - these define the actual cell area in buffer
+                       (marker-start-pos (marker-position start-marker))
+                       (marker-end-pos (marker-position end-marker))
 
-      ;; Find which cell contains the current position
-      (let ((found-cell nil)
-            (current-row-start 0))
-        (dotimes (r rows)
-          (let ((row-height (aref row-heights r)))
-            (when (and (>= current-line current-row-start)
-                       (< current-line (+ current-row-start row-height)))
-              ;; We're in this row, now find the column
-              (let ((current-col-start 0))
-                (dotimes (c cols)
-                  (let ((col-width (aref col-widths c)))
-                    (when (and (>= current-col current-col-start)
-                               (< current-col (+ current-col-start col-width)))
-                      ;; Found the cell
-                      (setq found-cell (fragment-grid-get grid r c)))
-                    (setq current-col-start (+ current-col-start col-width gap))))))
-            (setq current-row-start (+ current-row-start row-height 1)))) ; +1 for newline
+                       ;; Convert to line/column for multi-line area calculation
+                       (marker-start-line (line-number-at-pos marker-start-pos))
+                       (marker-start-col (save-excursion (goto-char marker-start-pos) (current-column)))
+                       (marker-end-line (line-number-at-pos marker-end-pos))
+                       (marker-end-col (save-excursion (goto-char marker-end-pos) (current-column)))
 
-        ;; Debug output
-        (message "Click at line %d, col %d -> cell %s"
-                 current-line current-col
-                 (if found-cell
-                     (format "(%d,%d)" (oref found-cell row) (oref found-cell col))
-                   "none"))
-        found-cell))))
+                       ;; Current cursor position
+                       (current-line (line-number-at-pos current-pos))
+                       (current-col (current-column))
+
+                       ;; Calculate cell area: markers define horizontal span, geometry defines vertical span
+                       (cell-width-from-markers (- marker-end-pos marker-start-pos))
+                       (cell-height (oref cell height))
+                       (cell-area-end-line (+ marker-start-line cell-height -1))
+                       (cell-area-end-col (+ marker-start-col cell-width-from-markers)))
+
+                  ;; Check if cursor is within the cell area using marker boundaries + cell height
+                  (when (and (>= current-line marker-start-line)
+                            (<= current-line cell-area-end-line)
+                            (>= current-col marker-start-col)
+                            (< current-col cell-area-end-col))
+                    (setq found-cell cell)
+                    (message "HYBRID: Cell (%d,%d) at cursor L%d C%d - markers define area L%d C%d to L%d C%d"
+                             (oref cell row) (oref cell col)
+                             current-line current-col
+                             marker-start-line marker-start-col
+                             cell-area-end-line cell-area-end-col)))))))))
+
+    found-cell))
 
 (defun fragment-merge-cells-demo (grid cell1 cell2)
   "Merge CELL1 and CELL2 in GRID using border-based system."
