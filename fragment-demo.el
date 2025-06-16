@@ -106,6 +106,206 @@
     (goto-char (point-min))
     (message "Text Wrap Demo: Cell 0=wrapped, 1=truncated, 2=multi+wrap, 3=normal")))
 
+;;;###autoload
+(defun fragment-merge-demo ()
+  "Demo showcasing cell merging by clicking cells."
+  (interactive)
+  (switch-to-buffer (get-buffer-create "*Fragment Merge Demo*"))
+  (erase-buffer)
+  (fragment-grid-mode 1)
+
+  ;; Create 4x4 grid for merge demo
+  (let ((grid (fragment-create-grid 4 4)))
+
+    ;; No gap for seamless color coverage
+    (oset grid gap 0)
+
+    ;; Add content and colors to cells
+    (setq demo-color-index 0)
+    (dotimes (r 4)
+      (dotimes (c 4)
+        (let ((cell (fragment-grid-get grid r c))
+              (bg-color (demo-next-color)))
+          (oset cell background-color bg-color)
+          (oset cell foreground-color "white")
+          (fragment-cell-set-content cell (format " %d,%d " r c))
+          (oset cell width 8)
+          (oset cell height 3))))
+
+    ;; Re-render after setting content
+    (fragment-grid-render grid)
+
+    ;; Set up click-to-merge functionality
+    (fragment-setup-merge-clicking grid)
+
+    (goto-char (point-min))
+    (message "Merge Demo: Click two cells to merge them. First click selects, second merges.")))
+
+(defvar fragment--merge-selection nil
+  "Stores the first selected cell for merging.")
+
+(defun fragment-setup-merge-clicking (grid)
+  "Set up mouse clicking for merge demo."
+  (message "Setting up mouse click handler...")
+  ;; Make sure we're in the right buffer and mode
+  (setq buffer-read-only nil)
+  (local-set-key [down-mouse-1] 'ignore) ; Ignore down events to prevent issues
+  (local-set-key [mouse-1]
+    (lambda (event)
+      (interactive "e")
+      (message "Mouse click detected!")
+      ;; Prevent any text insertion from the mouse event
+      (let ((inhibit-read-only t)
+            (click-pos (posn-point (event-start event))))
+        (when click-pos
+          (goto-char click-pos)
+          (fragment-handle-merge-click grid))))))
+
+(defun fragment-handle-merge-click (grid)
+  "Handle cell clicking for merge demo."
+  (let ((cell (fragment-demo-cell-at-point grid)))
+    (if cell
+        (let ((row (oref cell row))
+              (col (oref cell col)))
+          (if fragment--merge-selection
+              ;; Second click - merge the cells
+              (let ((sel-row (oref fragment--merge-selection row))
+                    (sel-col (oref fragment--merge-selection col)))
+                (if (and (= row sel-row) (= col sel-col))
+                    (message "Same cell selected. Try clicking a different cell.")
+                  (progn
+                    (fragment-merge-cells-demo grid fragment--merge-selection cell)
+                    (setq fragment--merge-selection nil)
+                    (message "Cells (%d,%d) and (%d,%d) merged!" sel-row sel-col row col))))
+            ;; First click - select the cell
+            (setq fragment--merge-selection cell)
+            ;; Add visual feedback by temporarily changing the cell content
+            ;; BUT don't re-render the whole grid to avoid losing colors
+            (let ((original-content (oref cell content)))
+              (oset cell content (format " [%d,%d] " row col))
+              ;; Update just this cell's content in place using its markers
+              (when (oref cell markers)
+                (let ((start-marker (fragment-marker-pair-start (oref cell markers)))
+                      (end-marker (fragment-marker-pair-end (oref cell markers))))
+                  (when (and start-marker end-marker)
+                    (let ((inhibit-read-only t)
+                          (start-pos (marker-position start-marker))
+                          (end-pos (marker-position end-marker)))
+                      (when (and start-pos end-pos)
+                        (goto-char start-pos)
+                        (delete-region start-pos end-pos)
+                        (let ((new-content (fragment-pad-string (oref cell content) (- end-pos start-pos))))
+                          (insert new-content)
+                          ;; Apply color directly to the region we just inserted
+                          (fragment-apply-face-to-region cell start-pos (+ start-pos (length new-content))))))))))
+            (message "Cell (%d,%d) selected. Click another cell to merge." row col)))
+      ;; No cell found
+      (message "No cell found at click position"))))
+
+(defun fragment-demo-cell-at-point (grid)
+  "Find which cell the cursor is in for demo purposes."
+  (let* ((current-line (1- (line-number-at-pos))) ; 0-based line number
+         (current-col (current-column))            ; 0-based column number
+         (rows (oref grid rows))
+         (cols (oref grid columns))
+         (gap (oref grid gap)))
+
+    ;; Calculate cell dimensions based on actual grid layout
+    (let ((row-heights (make-vector rows 0))
+          (col-widths (make-vector cols 0)))
+
+      ;; Find max height for each row and max width for each column
+      (dotimes (r rows)
+        (let ((max-height 0))
+          (dotimes (c cols)
+            (let ((cell (fragment-grid-get grid r c)))
+              (when cell
+                (setq max-height (max max-height (oref cell height)))
+                (aset col-widths c (max (aref col-widths c) (oref cell width))))))
+          (aset row-heights r max-height)))
+
+      ;; Find which cell contains the current position
+      (let ((found-cell nil)
+            (current-row-start 0))
+        (dotimes (r rows)
+          (let ((row-height (aref row-heights r)))
+            (when (and (>= current-line current-row-start)
+                       (< current-line (+ current-row-start row-height)))
+              ;; We're in this row, now find the column
+              (let ((current-col-start 0))
+                (dotimes (c cols)
+                  (let ((col-width (aref col-widths c)))
+                    (when (and (>= current-col current-col-start)
+                               (< current-col (+ current-col-start col-width)))
+                      ;; Found the cell
+                      (setq found-cell (fragment-grid-get grid r c)))
+                    (setq current-col-start (+ current-col-start col-width gap))))))
+            (setq current-row-start (+ current-row-start row-height 1)))) ; +1 for newline
+
+        ;; Debug output
+        (message "Click at line %d, col %d -> cell %s"
+                 current-line current-col
+                 (if found-cell
+                     (format "(%d,%d)" (oref found-cell row) (oref found-cell col))
+                   "none"))
+        found-cell))))
+
+(defun fragment-merge-cells-demo (grid cell1 cell2)
+  "Merge CELL1 and CELL2 in GRID using border-based system."
+  (let* ((r1 (oref cell1 row)) (c1 (oref cell1 col))
+         (r2 (oref cell2 row)) (c2 (oref cell2 col)))
+    (cond
+     ;; Horizontal merge (same row, adjacent columns)
+     ((and (= r1 r2) (= (abs (- c1 c2)) 1))
+      (let ((left-cell (if (< c1 c2) cell1 cell2))
+            (right-cell (if (< c1 c2) cell2 cell1)))
+        ;; Set merge properties
+        (oset left-cell east-open t)
+        (oset right-cell west-open t)
+        (oset right-cell is-master nil)
+        (oset right-cell master-cell left-cell)
+
+        ;; Update colors - both cells get the same color (from master)
+        (let ((master-bg-color (oref left-cell background-color))
+              (master-fg-color (oref left-cell foreground-color)))
+          (oset right-cell background-color master-bg-color)
+          (oset right-cell foreground-color master-fg-color)
+          (message "DEBUG: After merge - Left cell bg=%s, Right cell bg=%s"
+                   (oref left-cell background-color) (oref right-cell background-color)))
+
+        ;; Keep original content of master cell - no content change needed
+
+        ;; Re-render to show the merge
+        (fragment-grid-render grid)
+        ;; Force a complete color refresh with a small delay to ensure it takes
+        (sit-for 0.01)
+        (fragment-grid-apply-colors grid)))
+     ;; Vertical merge (same column, adjacent rows)
+     ((and (= c1 c2) (= (abs (- r1 r2)) 1))
+      (let ((top-cell (if (< r1 r2) cell1 cell2))
+            (bottom-cell (if (< r1 r2) cell2 cell1)))
+        ;; Set merge properties
+        (oset top-cell south-open t)
+        (oset bottom-cell north-open t)
+        (oset bottom-cell is-master nil)
+        (oset bottom-cell master-cell top-cell)
+
+        ;; Update colors - both cells get the same color (from master)
+        (let ((master-bg-color (oref top-cell background-color))
+              (master-fg-color (oref top-cell foreground-color)))
+          (oset bottom-cell background-color master-bg-color)
+          (oset bottom-cell foreground-color master-fg-color))
+
+        ;; Keep original content of master cell - no content change needed
+
+        ;; Re-render to show the merge
+        (fragment-grid-render grid)
+        ;; Force a complete color refresh with a small delay to ensure it takes
+        (sit-for 0.01)
+        (fragment-grid-apply-colors grid)))
+     ;; Not adjacent
+     (t (message "Cells must be adjacent to merge")))))
+
 ;; Auto-run demo when file is loaded
 (when (not noninteractive)
   (fragment-demo))

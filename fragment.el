@@ -149,6 +149,30 @@
               :type boolean
               :documentation "Whether to wrap text that exceeds cell width")
 
+   ;; Border-based merging system
+   (north-open :initform nil
+               :type boolean
+               :documentation "Whether the north border is open (merged)")
+
+   (south-open :initform nil
+               :type boolean
+               :documentation "Whether the south border is open (merged)")
+
+   (east-open :initform nil
+              :type boolean
+              :documentation "Whether the east border is open (merged)")
+
+   (west-open :initform nil
+              :type boolean
+              :documentation "Whether the west border is open (merged)")
+
+   (is-master :initform t
+              :type boolean
+              :documentation "Whether this cell is a master cell (top-left of merged area)")
+
+   (master-cell :initform nil
+                :documentation "Reference to the master cell if this is not a master")
+
    ;; Parent reference
    (grid :initarg :grid
          :initform nil
@@ -399,6 +423,8 @@
       (fragment-grid-set-all-markers grid))
 
     ;; Apply colors after rendering with proper cell area coverage
+    ;; Wait for any pending operations and then apply colors
+    (sit-for 0) ; Process any pending events
     (fragment-grid-apply-colors grid)
 
     ;; Add expand buttons
@@ -441,17 +467,25 @@
               (dotimes (c cols)
                 (let* ((cell (fragment-grid-get grid r c))
                        (col-width (aref col-widths c))
-                       (cell-content (if cell
-                                        (let* ((content (oref cell content))
-                                               (text-wrap (oref cell text-wrap))
-                                               ;; Apply wrapping if enabled
-                                               (processed-content (if text-wrap
-                                                                     (fragment-wrap-text-to-width content col-width)
-                                                                   content))
-                                               (lines (split-string processed-content "\n"))
-                                               (cell-line (or (nth line-idx lines) "")))
-                                          (fragment-pad-string cell-line col-width))
-                                      (make-string col-width ?\s))))
+                       (cell-content
+                        (cond
+                         ;; Skip non-master cells (they're rendered by their master)
+                         ((and cell (not (oref cell is-master)))
+                          (make-string col-width ?\s))
+
+                         ;; Render master cell content
+                         (cell
+                          (let* ((content (oref cell content))
+                                 (text-wrap (oref cell text-wrap))
+                                 (processed-content (if text-wrap
+                                                       (fragment-wrap-text-to-width content col-width)
+                                                     content))
+                                 (lines (split-string processed-content "\n"))
+                                 (cell-line (or (nth line-idx lines) "")))
+                            (fragment-pad-string cell-line col-width)))
+
+                         ;; Empty cell
+                         (t (make-string col-width ?\s)))))
                   (setq line (concat line cell-content))
                   ;; Add gap except after last column
                   (when (< c (1- cols))
@@ -619,6 +653,7 @@
                          (col-width (aref col-widths c))
                          (cell-height (oref cell height)))
 
+                    ;; Apply color to all cells (master and non-master merged cells)
                     ;; Apply color to each line of the cell
                     (dotimes (line-idx cell-height)
                       (let* ((line-start (+ row-start-pos
