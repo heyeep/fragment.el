@@ -275,6 +275,21 @@
           width
         break-point))))
 
+;;; Color Management
+
+(defvar fragment--color-list '("#FF6B6B" "#4ECDC4" "#45B7D1" "#96CEB4" "#FFEAA7"
+                               "#DDA0DD" "#98D8E8" "#F7DC6F" "#BB8FCE" "#85C1E9")
+  "List of colors for grid cells.")
+
+(defvar fragment--color-index 0
+  "Current index in the color list.")
+
+(defun fragment-get-next-color ()
+  "Get the next color from the color list, cycling through."
+  (let ((color (nth fragment--color-index fragment--color-list)))
+    (setq fragment--color-index (mod (1+ fragment--color-index) (length fragment--color-list)))
+    color))
+
 ;;; Grid Creation and Management
 
 (defun fragment-grid-create (rows cols)
@@ -386,8 +401,11 @@
     ;; Apply colors after rendering with proper cell area coverage
     (fragment-grid-apply-colors grid)
 
-    ;; Make grid content read-only
-    (fragment-grid-make-readonly grid)
+    ;; Add expand buttons
+    (fragment-grid-add-expand-buttons grid)
+
+    ;; Make grid content read-only (but not the buttons)
+    ;; (fragment-grid-make-readonly grid)  ; Temporarily disabled
 
     ;; Set current grid for editing
     (setq-local fragment--current-grid grid)))
@@ -637,13 +655,143 @@
     (set-marker (oref grid end-marker) end-pos (current-buffer))
     (set-marker-insertion-type (oref grid end-marker) t)))
 
+(defun fragment-grid-add-expand-buttons (grid)
+  "Add expand buttons below the GRID."
+  (save-excursion
+    ;; Add buttons below the grid
+    (goto-char (point-max))
+    (insert "\n")
+    (insert-button "[+Row]"
+                  'action (lambda (_button) (fragment-expand-row))
+                  'face 'default
+                  'help-echo "Add row")
+    (insert "    ")  ; Some spacing
+    (insert-button "[+Col]"
+                  'action (lambda (_button) (fragment-expand-column))
+                  'face 'default
+                  'help-echo "Add column")))
+
 (defun fragment-grid-make-readonly (grid)
-  "Make GRID content read-only using text properties."
-  (let ((start-pos (point-min))
-        (end-pos (point-max)))
-    (put-text-property start-pos end-pos 'read-only t)
-    (put-text-property start-pos end-pos 'front-sticky '(read-only))
-    (put-text-property start-pos end-pos 'rear-nonsticky '(read-only))))
+  "Make GRID content read-only using text properties, but preserve buttons."
+  (let ((start-pos (point-min)))
+    ;; Find all button positions to exclude them from read-only
+    (save-excursion
+      (goto-char start-pos)
+      (let ((current-pos start-pos))
+        (while (< current-pos (point-max))
+          (let ((next-button (next-single-property-change current-pos 'action)))
+            (when next-button
+              ;; Make text before button read-only
+              (when (< current-pos next-button)
+                (put-text-property current-pos next-button 'read-only t)
+                (put-text-property current-pos next-button 'front-sticky '(read-only))
+                (put-text-property current-pos next-button 'rear-nonsticky '(read-only)))
+              ;; Skip over the button
+              (setq current-pos (or (next-single-property-change next-button 'action) (point-max))))
+            (unless next-button
+              ;; Make remaining text read-only
+              (when (< current-pos (point-max))
+                (put-text-property current-pos (point-max) 'read-only t)
+                (put-text-property current-pos (point-max) 'front-sticky '(read-only))
+                (put-text-property current-pos (point-max) 'rear-nonsticky '(read-only)))
+              (setq current-pos (point-max)))))))))
+
+;;; Grid Expansion Functions
+
+(defun fragment-grid-add-column (grid)
+  "Add a new column to the right of GRID."
+  (let ((rows (oref grid rows))
+        (cols (oref grid columns)))
+    ;; Update grid dimensions
+    (oset grid columns (1+ cols))
+
+    ;; Add new cells in the new column with colors
+    (dotimes (r rows)
+      (let ((cell (fragment-cell :row r :col cols :grid grid))
+            (bg-color (fragment-get-next-color)))
+        (oset cell background-color bg-color)
+        (oset cell foreground-color "white")
+        (fragment-cell-set-content cell (format " %d,%d " r cols))
+        (fragment-grid-add-cell grid cell)))
+
+    ;; Re-render the grid
+    (fragment-grid-render grid)
+
+    ;; Recalculate layout to fit properly
+    (fragment-grid-recalculate-layout grid)))
+
+(defun fragment-grid-add-row (grid)
+  "Add a new row to the bottom of GRID."
+  (let ((rows (oref grid rows))
+        (cols (oref grid columns)))
+    ;; Update grid dimensions
+    (oset grid rows (1+ rows))
+
+    ;; Add new cells in the new row with colors
+    (dotimes (c cols)
+      (let ((cell (fragment-cell :row rows :col c :grid grid))
+            (bg-color (fragment-get-next-color)))
+        (oset cell background-color bg-color)
+        (oset cell foreground-color "white")
+        (fragment-cell-set-content cell (format " %d,%d " rows c))
+        (fragment-grid-add-cell grid cell)))
+
+    ;; Re-render the grid
+    (fragment-grid-render grid)
+
+    ;; Recalculate layout to fit properly
+    (fragment-grid-recalculate-layout grid)))
+
+(defun fragment-grid-recalculate-layout (grid)
+  "Recalculate and resize all cells in GRID to fill the entire window."
+  (let ((window-width (window-width))
+        (window-height (window-height))
+        (rows (oref grid rows))
+        (cols (oref grid columns))
+        (gap (oref grid gap)))
+
+    ;; Calculate cell dimensions to fill the entire available space
+    (let* ((total-gap-width (* (1- cols) gap))
+           (total-gap-height (* (1- rows) gap))
+           ;; Use almost all available space, leaving minimal room for buttons
+           (button-space 2) ; Just enough for the buttons below
+           (available-width (- window-width total-gap-width))
+           (available-height (- window-height total-gap-height button-space))
+           (base-cell-width (/ available-width cols))
+           (base-cell-height (/ available-height rows))
+           ;; Calculate remainder pixels to distribute
+           (width-remainder (% available-width cols))
+           (height-remainder (% available-height rows)))
+
+      ;; Resize all cells, distributing remainder pixels
+      (dotimes (r rows)
+        (dotimes (c cols)
+          (let ((cell (fragment-grid-get grid r c)))
+            (when cell
+              ;; Give extra width/height to first few cells to use up remainder
+              (let ((cell-width (+ base-cell-width (if (< c width-remainder) 1 0)))
+                    (cell-height (+ base-cell-height (if (< r height-remainder) 1 0))))
+                (oset cell width cell-width)
+                (oset cell height cell-height))))))
+
+      ;; Re-render with new dimensions that fill the window
+      (fragment-grid-render grid))))
+
+(defun fragment-expand-column ()
+  "Add a column to the current grid."
+  (interactive)
+  (message "Expanding column...")
+  (when fragment--current-grid
+    (fragment-grid-add-column fragment--current-grid))
+  (message "Column expansion complete"))
+
+(defun fragment-expand-row ()
+  "Add a row to the current grid."
+  (interactive)
+  (message "Expanding row...")
+  (when fragment--current-grid
+    (fragment-grid-add-row fragment--current-grid))
+  (message "Row expansion complete"))
 
 ;;; Cell Editing Functions
 
